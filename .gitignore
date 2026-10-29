@@ -1,0 +1,11 @@
+.venv/
+.local_data/
+.flet/
+build/
+__pycache__/
+*.pyc
+.idea/
+signing.local.bat
+*.jks
+*.keystore
+release_keys/
