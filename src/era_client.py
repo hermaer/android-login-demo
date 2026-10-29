@@ -86,9 +86,9 @@ class ERAClient:
     def chats(self, token: str) -> list[dict]:
         return self.request("GET", "/api/mobile/v1/chats", token)
 
-    def messages(self, token: str, user_id: int, after_id: int = 0) -> list[dict]:
+    def messages(self, token: str, user_id: int, after_id: int = 0, limit: int = 80) -> list[dict]:
         return self.request("GET", f"/api/mobile/v1/chats/{user_id}/messages",
-                            token, query={"after_id": after_id})
+                            token, query={"after_id": after_id, "limit": int(limit)})
 
     def send(self, token: str, user_id: int, text: str) -> dict:
         return self.request("POST", f"/api/mobile/v1/chats/{user_id}/messages", token,

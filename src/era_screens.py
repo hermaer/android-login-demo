@@ -40,9 +40,9 @@ class MobileScreens:
     def launch(self, coro):
         asyncio.create_task(coro)
 
-    def go(self, title, controls, back=None):
+    def go(self, title, controls, back=None, subtitle=None):
         self.stop_poll()
-        self.view(title, controls, back=back or self.home)
+        self.view(title, controls, back=back or self.home, subtitle=subtitle)
 
     def text(self, value, size=13, color=WHITE, weight=None):
         return ft.Text(str(value), size=size, color=color, weight=weight)
@@ -50,14 +50,43 @@ class MobileScreens:
     def small(self, value):
         return self.text(value, 12, PALE)
 
-    def panel(self, contents):
-        return ft.Container(border_radius=13, bgcolor=BG_CARD, padding=12,
-                            content=ft.Column(controls=contents, spacing=7))
+    def panel(self, contents, title=None):
+        rows = []
+        if title:
+            rows.append(ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=WHITE))
+        rows.extend(contents)
+        return ft.Container(
+            border_radius=16,
+            bgcolor=BG_CARD,
+            padding=12,
+            border=ft.Border.all(1, '#29415F'),
+            content=ft.Column(controls=rows, spacing=8),
+        )
 
     def action(self, label, handler, icon=None, primary=False):
-        return ft.Button(content=label, icon=icon,
-                         bgcolor=BLUE if primary else None, color='#0B1220' if primary else WHITE,
-                         on_click=lambda e: self.launch(handler()))
+        kwargs = dict(content=label, icon=icon, on_click=lambda e: self.launch(handler()))
+        if primary:
+            kwargs.update(bgcolor=BLUE, color='#0B1220')
+            return ft.Button(**kwargs)
+        return ft.OutlinedButton(**kwargs)
+
+    def section(self, title, subtitle=None):
+        rows = [self.text(title, 16, weight=ft.FontWeight.BOLD)]
+        if subtitle:
+            rows.append(self.small(subtitle))
+        return ft.Column(controls=rows, spacing=2)
+
+    def stats_row(self, items):
+        cards = []
+        for label, value, color in items:
+            cards.append(ft.Container(
+                expand=True,
+                padding=10,
+                bgcolor=BG_ALT,
+                border_radius=12,
+                content=ft.Column(controls=[self.small(label), self.text(value, 18, color)], spacing=3),
+            ))
+        return ft.Row(controls=cards, spacing=8)
 
     def date_ok(self, value):
         try:
@@ -86,26 +115,28 @@ class MobileScreens:
         if data is None: return
         user = data['user']
         self.update_user(user)
+        event_cards = [self.panel([self.text(x['title'], 14), self.small(x['event_date'])])
+                       for x in data['upcoming_events']] or [self.small('Ближайших событий пока нет')]
         self.go('ЭРА · Главная', [
             self.panel([self.text('Добро пожаловать, ' + (user.get('username') or ''), 18),
                         self.small('Один аккаунт на сайте и Android')]),
-            ft.Row(controls=[
-                ft.Container(expand=True, padding=10, bgcolor=BG_ALT, border_radius=10,
-                             content=ft.Column(controls=[self.small('Монеты'), self.text(f"{user['balance_coin']:,.0f}", 19, GREEN)])),
-                ft.Container(expand=True, padding=10, bgcolor=BG_ALT, border_radius=10,
-                             content=ft.Column(controls=[self.small('Уровень'), self.text(user['level'], 19)])),
+            self.stats_row([
+                ('Монеты', f"{user['balance_coin']:,.0f}", GREEN),
+                ('Уровень', str(user['level']), WHITE),
             ]),
-            self.panel([self.text(f"Непрочитанные сообщения: {data['unread_messages']}"),
-                        self.text(f"Расходы за месяц: {data['month_expenses']:,.2f}")]),
-            self.text('Ближайшие события', 16),
-            *(self.panel([self.text(x['title'], 14), self.small(x['event_date'])])
-              for x in data['upcoming_events']),
+            self.stats_row([
+                ('Непрочитанные сообщения', str(data['unread_messages']), WHITE),
+                ('Расходы за месяц', f"{data['month_expenses']:,.2f}", GREEN),
+            ]),
+            self.section('Ближайшие события', 'Краткий обзор календаря ЭРА'),
+            *event_cards,
+            self.section('Быстрые действия'),
             self.action('Лента новостей', self.news, ft.Icons.ARTICLE),
             self.action('Читать внешние новости', self.feed, ft.Icons.PUBLIC),
             self.action('Календарь', self.calendar, ft.Icons.CALENDAR_MONTH),
             self.action('Мои расходы', self.expenses, ft.Icons.RECEIPT_LONG),
             self.action('Магазин', self.shop, ft.Icons.SHOPPING_BAG),
-        ])
+        ], subtitle='Короткая сводка по аккаунту, событиям и финансам.')
 
     async def profile(self):
         data = await self.request(self.api.profile)
@@ -127,7 +158,7 @@ class MobileScreens:
             self.action('Мои покупки', self.inventory, ft.Icons.INVENTORY_2),
             self.action('Шрифт чата', self.chat_fonts, ft.Icons.FONT_DOWNLOAD),
         ]
-        self.go('Мой профиль', elems)
+        self.go('Мой профиль', elems, subtitle='Данные синхронизируются с профилем на сайте ЭРА.')
 
     async def avatar_picker(self):
         try:
@@ -202,7 +233,7 @@ class MobileScreens:
             contents.append(self.action('Следующие', lambda: self.news(skip + 20), ft.Icons.ARROW_FORWARD))
         if self.current_user().get('is_admin'):
             contents.append(self.action('Добавить новость (администратор)', self.admin_news_form, ft.Icons.ADD))
-        self.go('Новости ЭРА', contents)
+        self.go('Новости ЭРА', contents, subtitle='Лента новостей и публикаций сайта ЭРА.')
 
     async def news_detail(self, news_id):
         n = await self.request(self.api.news_item, news_id)
@@ -251,7 +282,7 @@ class MobileScreens:
             if action: entry.append(action)
             contents.append(self.panel(entry))
         if not rows: contents.append(self.small('По запросу ничего не найдено'))
-        self.go('Внешняя лента', contents)
+        self.go('Внешняя лента', contents, subtitle='Поиск новостей из внешних источников.')
 
     async def calendar(self):
         rows = await self.request(self.api.calendar)
@@ -264,7 +295,7 @@ class MobileScreens:
                 self.action('Удалить', lambda a=x: self.calendar_confirm_delete(a), ft.Icons.DELETE),
             ]))
         if not rows: contents.append(self.small('Событий нет'))
-        self.go('Календарь', contents)
+        self.go('Календарь', contents, subtitle='Личные события и напоминания.')
 
     async def calendar_form(self):
         title = ft.TextField(label='Название события')
@@ -312,7 +343,7 @@ class MobileScreens:
                 self.action('Удалить', lambda a=x: self.expense_confirm_delete(a), ft.Icons.DELETE),
             ]))
         if not rows: contents.append(self.small('Расходов пока нет'))
-        self.go('Мои расходы', contents)
+        self.go('Мои расходы', contents, subtitle='Расходы, категории и краткая аналитика.')
 
     async def expense_form(self):
         cats = await self.request(self.api.expense_categories)
@@ -384,7 +415,7 @@ class MobileScreens:
                 entry.append(self.action('Купить', lambda item=x: self.buy_confirm(item), ft.Icons.SHOPPING_CART))
             contents.append(self.panel(entry))
         if not data['items']: contents.append(self.small('Товаров нет'))
-        self.go('Магазин ЭРА', contents)
+        self.go('Магазин ЭРА', contents, subtitle='Покупки за монеты и доступные товары.')
 
     async def buy_confirm(self, item):
         async def buy():
@@ -401,9 +432,9 @@ class MobileScreens:
         items = await self.request(self.api.inventory)
         if items is None: return
         self.go('Мои покупки', [*[self.panel([self.text(x['name'], 15),
-                                            self.small(x['description'])]) for x in items],
+                                            self.small(x['description'])], title='Приобретённый товар') for x in items],
                                  *([self.small('Покупок пока нет')] if not items else [])],
-                back=lambda: self.launch(self.shop()))
+                back=lambda: self.launch(self.shop()), subtitle='Все товары, которые уже приобретены.')
 
     async def chat_fonts(self):
         data = await self.request(self.api.fonts)
@@ -417,7 +448,7 @@ class MobileScreens:
                     self.notify('Шрифт сохранён')
                     await self.chat_fonts()
             contents.append(self.action(row['name'] + suffix, save, ft.Icons.TEXT_FIELDS))
-        self.go('Шрифт чата', contents, back=lambda: self.launch(self.profile()))
+        self.go('Шрифт чата', contents, back=lambda: self.launch(self.profile()), subtitle='Настройка шрифта синхронизируется с веб-версией.')
 
     async def admin_news_form(self, item=None):
         if not self.current_user().get('is_admin'):

@@ -1,0 +1,903 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index e65cfa9..1ebcf6d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,12 +1,12 @@
+ [project]
+ name = "simplecabinet"
+-version = "0.6.0"
++version = "0.6.1"
+ description = "ERA Android mobile: news, calendar, store, expenses, chat, profile"
+ requires-python = ">=3.10"
+ dependencies = ["flet==1.0.5", "flet-secure-storage==1.0.5"]
+ 
+ [tool.flet]
+-build_number = 6  # Increment for each new APK update.
++build_number = 7  # Increment for each new APK update.
+ org = "com.example"
+ product = "Мой кабинет"
+ bundle_id = "com.example.simplecabinet"
+diff --git a/src/era_client.py b/src/era_client.py
+index 3b78ce7..cedbef5 100644
+--- a/src/era_client.py
++++ b/src/era_client.py
+@@ -86,9 +86,9 @@ class ERAClient:
+     def chats(self, token: str) -> list[dict]:
+         return self.request("GET", "/api/mobile/v1/chats", token)
+ 
+-    def messages(self, token: str, user_id: int, after_id: int = 0) -> list[dict]:
++    def messages(self, token: str, user_id: int, after_id: int = 0, limit: int = 80) -> list[dict]:
+         return self.request("GET", f"/api/mobile/v1/chats/{user_id}/messages",
+-                            token, query={"after_id": after_id})
++                            token, query={"after_id": after_id, "limit": int(limit)})
+ 
+     def send(self, token: str, user_id: int, text: str) -> dict:
+         return self.request("POST", f"/api/mobile/v1/chats/{user_id}/messages", token,
+diff --git a/src/era_screens.py b/src/era_screens.py
+index 31b76ff..ab3b9a4 100644
+--- a/src/era_screens.py
++++ b/src/era_screens.py
+@@ -40,9 +40,9 @@ class MobileScreens:
+     def launch(self, coro):
+         asyncio.create_task(coro)
+ 
+-    def go(self, title, controls, back=None):
++    def go(self, title, controls, back=None, subtitle=None):
+         self.stop_poll()
+-        self.view(title, controls, back=back or self.home)
++        self.view(title, controls, back=back or self.home, subtitle=subtitle)
+ 
+     def text(self, value, size=13, color=WHITE, weight=None):
+         return ft.Text(str(value), size=size, color=color, weight=weight)
+@@ -50,14 +50,43 @@ class MobileScreens:
+     def small(self, value):
+         return self.text(value, 12, PALE)
+ 
+-    def panel(self, contents):
+-        return ft.Container(border_radius=13, bgcolor=BG_CARD, padding=12,
+-                            content=ft.Column(controls=contents, spacing=7))
++    def panel(self, contents, title=None):
++        rows = []
++        if title:
++            rows.append(ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=WHITE))
++        rows.extend(contents)
++        return ft.Container(
++            border_radius=16,
++            bgcolor=BG_CARD,
++            padding=12,
++            border=ft.border.all(1, '#29415F'),
++            content=ft.Column(controls=rows, spacing=8),
++        )
+ 
+     def action(self, label, handler, icon=None, primary=False):
+-        return ft.Button(content=label, icon=icon,
+-                         bgcolor=BLUE if primary else None, color='#0B1220' if primary else WHITE,
+-                         on_click=lambda e: self.launch(handler()))
++        kwargs = dict(content=label, icon=icon, on_click=lambda e: self.launch(handler()))
++        if primary:
++            kwargs.update(bgcolor=BLUE, color='#0B1220')
++            return ft.Button(**kwargs)
++        return ft.OutlinedButton(**kwargs)
++
++    def section(self, title, subtitle=None):
++        rows = [self.text(title, 16, weight=ft.FontWeight.BOLD)]
++        if subtitle:
++            rows.append(self.small(subtitle))
++        return ft.Column(controls=rows, spacing=2)
++
++    def stats_row(self, items):
++        cards = []
++        for label, value, color in items:
++            cards.append(ft.Container(
++                expand=True,
++                padding=10,
++                bgcolor=BG_ALT,
++                border_radius=12,
++                content=ft.Column(controls=[self.small(label), self.text(value, 18, color)], spacing=3),
++            ))
++        return ft.Row(controls=cards, spacing=8)
+ 
+     def date_ok(self, value):
+         try:
+@@ -86,26 +115,28 @@ class MobileScreens:
+         if data is None: return
+         user = data['user']
+         self.update_user(user)
++        event_cards = [self.panel([self.text(x['title'], 14), self.small(x['event_date'])])
++                       for x in data['upcoming_events']] or [self.small('Ближайших событий пока нет')]
+         self.go('ЭРА · Главная', [
+             self.panel([self.text('Добро пожаловать, ' + (user.get('username') or ''), 18),
+                         self.small('Один аккаунт на сайте и Android')]),
+-            ft.Row(controls=[
+-                ft.Container(expand=True, padding=10, bgcolor=BG_ALT, border_radius=10,
+-                             content=ft.Column(controls=[self.small('Монеты'), self.text(f"{user['balance_coin']:,.0f}", 19, GREEN)])),
+-                ft.Container(expand=True, padding=10, bgcolor=BG_ALT, border_radius=10,
+-                             content=ft.Column(controls=[self.small('Уровень'), self.text(user['level'], 19)])),
++            self.stats_row([
++                ('Монеты', f"{user['balance_coin']:,.0f}", GREEN),
++                ('Уровень', str(user['level']), WHITE),
+             ]),
+-            self.panel([self.text(f"Непрочитанные сообщения: {data['unread_messages']}"),
+-                        self.text(f"Расходы за месяц: {data['month_expenses']:,.2f}")]),
+-            self.text('Ближайшие события', 16),
+-            *(self.panel([self.text(x['title'], 14), self.small(x['event_date'])])
+-              for x in data['upcoming_events']),
++            self.stats_row([
++                ('Непрочитанные сообщения', str(data['unread_messages']), WHITE),
++                ('Расходы за месяц', f"{data['month_expenses']:,.2f}", GREEN),
++            ]),
++            self.section('Ближайшие события', 'Краткий обзор календаря ЭРА'),
++            *event_cards,
++            self.section('Быстрые действия'),
+             self.action('Лента новостей', self.news, ft.Icons.ARTICLE),
+             self.action('Читать внешние новости', self.feed, ft.Icons.PUBLIC),
+             self.action('Календарь', self.calendar, ft.Icons.CALENDAR_MONTH),
+             self.action('Мои расходы', self.expenses, ft.Icons.RECEIPT_LONG),
+             self.action('Магазин', self.shop, ft.Icons.SHOPPING_BAG),
+-        ])
++        ], subtitle='Короткая сводка по аккаунту, событиям и финансам.')
+ 
+     async def profile(self):
+         data = await self.request(self.api.profile)
+@@ -127,7 +158,7 @@ class MobileScreens:
+             self.action('Мои покупки', self.inventory, ft.Icons.INVENTORY_2),
+             self.action('Шрифт чата', self.chat_fonts, ft.Icons.FONT_DOWNLOAD),
+         ]
+-        self.go('Мой профиль', elems)
++        self.go('Мой профиль', elems, subtitle='Данные синхронизируются с профилем на сайте ЭРА.')
+ 
+     async def avatar_picker(self):
+         try:
+@@ -202,7 +233,7 @@ class MobileScreens:
+             contents.append(self.action('Следующие', lambda: self.news(skip + 20), ft.Icons.ARROW_FORWARD))
+         if self.current_user().get('is_admin'):
+             contents.append(self.action('Добавить новость (администратор)', self.admin_news_form, ft.Icons.ADD))
+-        self.go('Новости ЭРА', contents)
++        self.go('Новости ЭРА', contents, subtitle='Лента новостей и публикаций сайта ЭРА.')
+ 
+     async def news_detail(self, news_id):
+         n = await self.request(self.api.news_item, news_id)
+@@ -251,7 +282,7 @@ class MobileScreens:
+             if action: entry.append(action)
+             contents.append(self.panel(entry))
+         if not rows: contents.append(self.small('По запросу ничего не найдено'))
+-        self.go('Внешняя лента', contents)
++        self.go('Внешняя лента', contents, subtitle='Поиск новостей из внешних источников.')
+ 
+     async def calendar(self):
+         rows = await self.request(self.api.calendar)
+@@ -264,7 +295,7 @@ class MobileScreens:
+                 self.action('Удалить', lambda a=x: self.calendar_confirm_delete(a), ft.Icons.DELETE),
+             ]))
+         if not rows: contents.append(self.small('Событий нет'))
+-        self.go('Календарь', contents)
++        self.go('Календарь', contents, subtitle='Личные события и напоминания.')
+ 
+     async def calendar_form(self):
+         title = ft.TextField(label='Название события')
+@@ -312,7 +343,7 @@ class MobileScreens:
+                 self.action('Удалить', lambda a=x: self.expense_confirm_delete(a), ft.Icons.DELETE),
+             ]))
+         if not rows: contents.append(self.small('Расходов пока нет'))
+-        self.go('Мои расходы', contents)
++        self.go('Мои расходы', contents, subtitle='Расходы, категории и краткая аналитика.')
+ 
+     async def expense_form(self):
+         cats = await self.request(self.api.expense_categories)
+@@ -384,7 +415,7 @@ class MobileScreens:
+                 entry.append(self.action('Купить', lambda item=x: self.buy_confirm(item), ft.Icons.SHOPPING_CART))
+             contents.append(self.panel(entry))
+         if not data['items']: contents.append(self.small('Товаров нет'))
+-        self.go('Магазин ЭРА', contents)
++        self.go('Магазин ЭРА', contents, subtitle='Покупки за монеты и доступные товары.')
+ 
+     async def buy_confirm(self, item):
+         async def buy():
+@@ -401,9 +432,9 @@ class MobileScreens:
+         items = await self.request(self.api.inventory)
+         if items is None: return
+         self.go('Мои покупки', [*[self.panel([self.text(x['name'], 15),
+-                                            self.small(x['description'])]) for x in items],
++                                            self.small(x['description'])], title='Приобретённый товар') for x in items],
+                                  *([self.small('Покупок пока нет')] if not items else [])],
+-                back=lambda: self.launch(self.shop()))
++                back=lambda: self.launch(self.shop()), subtitle='Все товары, которые уже приобретены.')
+ 
+     async def chat_fonts(self):
+         data = await self.request(self.api.fonts)
+@@ -417,7 +448,7 @@ class MobileScreens:
+                     self.notify('Шрифт сохранён')
+                     await self.chat_fonts()
+             contents.append(self.action(row['name'] + suffix, save, ft.Icons.TEXT_FIELDS))
+-        self.go('Шрифт чата', contents, back=lambda: self.launch(self.profile()))
++        self.go('Шрифт чата', contents, back=lambda: self.launch(self.profile()), subtitle='Настройка шрифта синхронизируется с веб-версией.')
+ 
+     async def admin_news_form(self, item=None):
+         if not self.current_user().get('is_admin'):
+diff --git a/src/main.py b/src/main.py
+index 2b07df4..d14eef5 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -1,9 +1,10 @@
+-"""ERA Android v0.6 — native ERA dashboard, news, chat, calendar, shop and expenses.
++"""ERA Android v0.6.1 — improved mobile UX for the existing ERA website.
+ 
+ The existing offline SQLite accounts are intentionally NOT migrated or deleted:
+ new login uses the existing website's username/password and PostgreSQL DB.
+ """
+ import asyncio
++from datetime import datetime
+ 
+ import flet as ft
+ import flet_secure_storage as fss
+@@ -16,6 +17,8 @@ from updater import UpdateCheckError, fetch_latest_release, is_newer
+ 
+ BG = "#0B1220"
+ CARD = "#162033"
++CARD_ALT = "#1D2A40"
++CARD_SOFT = "#223651"
+ ACCENT = "#5793FA"
+ TEXT = "#F2F6FF"
+ MUTED = "#A4B2C9"
+@@ -30,6 +33,7 @@ async def main(page: ft.Page):
+     page.bgcolor = BG
+     page.theme_mode = ft.ThemeMode.DARK
+     page.padding = 8
++    page.scroll = ft.ScrollMode.AUTO
+     storage = fss.SecureStorage()
+     token = ""
+     user = None
+@@ -53,26 +57,165 @@ async def main(page: ft.Page):
+             polling_task.cancel()
+         polling_task = None
+ 
+-    def view(title, controls, *, back=None):
+-        width = min(660, max(280, (page.width or 390) - 20))
+-        content = [
+-            ft.Container(bgcolor="#12233B", padding=12, border_radius=12,
+-                         content=ft.Row(controls=[
+-                             ft.Icon(ft.Icons.BOLT, color=ACCENT, size=27),
+-                             ft.Text("ЭРА", size=23, weight=ft.FontWeight.BOLD, color=TEXT),
+-                             ft.Text("· mobile", size=11, color=MUTED)])),
+-        ]
+-        if back:
+-            content.append(ft.TextButton(content="← Назад", on_click=lambda e: back()))
+-        content.extend([ft.Text(title, size=22, weight=ft.FontWeight.BOLD, color=TEXT), *controls])
++    def section_title(title, subtitle=None):
++        controls = [ft.Text(title, size=17, weight=ft.FontWeight.BOLD, color=TEXT)]
++        if subtitle:
++            controls.append(ft.Text(subtitle, size=12, color=MUTED))
++        return ft.Column(controls=controls, spacing=3)
++
++    def chip(label, value=None, color=MUTED):
++        text = label if value is None else f"{label}: {value}"
++        return ft.Container(
++            padding=ft.padding.symmetric(horizontal=10, vertical=6),
++            bgcolor=CARD_SOFT,
++            border_radius=999,
++            content=ft.Text(text, size=11, color=color),
++        )
++
++    def stat_card(label, value, accent=TEXT):
++        return ft.Container(
++            expand=True,
++            bgcolor=CARD_SOFT,
++            border_radius=14,
++            padding=12,
++            content=ft.Column(
++                spacing=3,
++                controls=[
++                    ft.Text(label, size=11, color=MUTED),
++                    ft.Text(str(value), size=20, color=accent, weight=ft.FontWeight.BOLD),
++                ],
++            ),
++        )
++
++    def action_button(label, on_click=None, *, icon=None, primary=False, expand=False, url=None):
++        kwargs = dict(content=label, icon=icon, expand=expand)
++        if url:
++            kwargs["action"] = ft.OpenUrl(url)
++        else:
++            kwargs["on_click"] = on_click
++        if primary:
++            kwargs["bgcolor"] = ACCENT
++            kwargs["color"] = BG
++            return ft.Button(**kwargs)
++        return ft.OutlinedButton(**kwargs)
++
++    def nav_card(title, subtitle, icon, callback, badge=None):
++        return ft.Container(
++            bgcolor=CARD_ALT,
++            border_radius=16,
++            padding=12,
++            border=ft.border.all(1, "#243856"),
++            content=ft.Row(
++                vertical_alignment=ft.CrossAxisAlignment.CENTER,
++                controls=[
++                    ft.Container(
++                        width=42,
++                        height=42,
++                        border_radius=12,
++                        bgcolor="#1E3A5F",
++                        content=ft.Icon(icon, color=ACCENT, size=24),
++                        alignment=ft.alignment.center,
++                    ),
++                    ft.Column(
++                        expand=True,
++                        spacing=2,
++                        controls=[
++                            ft.Text(title, size=15, color=TEXT, weight=ft.FontWeight.BOLD),
++                            ft.Text(subtitle, size=11, color=MUTED),
++                        ],
++                    ),
++                    *([chip(badge)] if badge else []),
++                    ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, icon_color=MUTED, on_click=lambda e: callback()),
++                ],
++            ),
++        )
++
++    def list_card(title, subtitle="", icon=ft.Icons.CIRCLE, on_click=None, trailing=None):
++        return ft.Container(
++            bgcolor=CARD_ALT,
++            border_radius=14,
++            padding=12,
++            border=ft.border.all(1, "#243856"),
++            content=ft.Row(
++                controls=[
++                    ft.Icon(icon, color=ACCENT, size=20),
++                    ft.Column(
++                        expand=True,
++                        spacing=2,
++                        controls=[
++                            ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_600),
++                            *([ft.Text(subtitle, color=MUTED, size=11)] if subtitle else []),
++                        ],
++                    ),
++                    *(trailing if isinstance(trailing, list) else ([trailing] if trailing else [])),
++                ]
++            ),
++            on_click=(lambda e: on_click()) if on_click else None,
++        )
++
++    def view(title, controls, *, back=None, subtitle=None):
++        width = min(720, max(280, (page.width or 390) - 16))
++        header = ft.Container(
++            bgcolor="#12233B",
++            padding=12,
++            border_radius=16,
++            border=ft.border.all(1, "#213453"),
++            content=ft.Row(
++                controls=[
++                    ft.Container(
++                        width=42,
++                        height=42,
++                        border_radius=14,
++                        bgcolor="#1E3A5F",
++                        alignment=ft.alignment.center,
++                        content=ft.Icon(ft.Icons.BOLT, color=ACCENT, size=24),
++                    ),
++                    ft.Column(
++                        expand=True,
++                        spacing=2,
++                        controls=[
++                            ft.Text("ЭРА", size=22, weight=ft.FontWeight.BOLD, color=TEXT),
++                            ft.Text("mobile · общий аккаунт с сайтом", size=11, color=MUTED),
++                        ],
++                    ),
++                    *([action_button("Назад", lambda e: back(), icon=ft.Icons.ARROW_BACK)] if back else []),
++                ]
++            ),
++        )
+         page.clean()
+-        page.add(ft.SafeArea(content=ft.Column(
+-            controls=[ft.Container(width=width, padding=13, bgcolor=CARD,
+-                                   border_radius=18,
+-                                   content=ft.Column(controls=content, spacing=13))],
+-            scroll=ft.ScrollMode.AUTO, expand=True,
+-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+-        ), expand=True))
++        page.add(
++            ft.SafeArea(
++                expand=True,
++                content=ft.Column(
++                    expand=True,
++                    scroll=ft.ScrollMode.AUTO,
++                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
++                    controls=[
++                        ft.Container(
++                            width=width,
++                            padding=14,
++                            bgcolor=CARD,
++                            border_radius=22,
++                            border=ft.border.all(1, "#243856"),
++                            content=ft.Column(
++                                spacing=14,
++                                controls=[
++                                    header,
++                                    ft.Column(
++                                        spacing=3,
++                                        controls=[
++                                            ft.Text(title, size=23, weight=ft.FontWeight.BOLD, color=TEXT),
++                                            *([ft.Text(subtitle, size=12, color=MUTED)] if subtitle else []),
++                                        ],
++                                    ),
++                                    *controls,
++                                ],
++                            ),
++                        )
++                    ],
++                ),
++            )
++        )
+         page.update()
+ 
+     async def call(func, *args):
+@@ -83,9 +226,9 @@ async def main(page: ft.Page):
+ 
+     def render_updates():
+         stop_poll()
+-        status = ft.Text("Нажмите для проверки GitHub Releases", color=MUTED)
++        status = ft.Text("Нажмите для проверки GitHub Releases", color=MUTED, size=12)
+         options = ft.Column(spacing=8)
+-        button = ft.Button(content="Проверить обновления", icon=ft.Icons.REFRESH)
++        button = action_button("Проверить обновления", icon=ft.Icons.REFRESH, primary=True)
+ 
+         async def check(e):
+             button.disabled = True
+@@ -96,13 +239,12 @@ async def main(page: ft.Page):
+                 release = await call(fetch_latest_release, GITHUB_OWNER, GITHUB_REPOSITORY)
+                 if is_newer(release.version, APP_VERSION):
+                     status.value = f"Доступно обновление {release.version}"
+-                    options.controls.append(ft.Text(release.title, color=TEXT))
+-                    if release.apk_url:
+-                        options.controls.append(ft.Button(content="Скачать APK",
+-                            icon=ft.Icons.DOWNLOAD, action=ft.OpenUrl(release.apk_url)))
+-                    else:
+-                        options.controls.append(ft.Button(content="Открыть выпуск GitHub",
+-                            action=ft.OpenUrl(release.page_url)))
++                    options.controls = [
++                        list_card(release.title, subtitle="Доступен новый выпуск на GitHub Releases",
++                                  icon=ft.Icons.UPDATE),
++                        action_button("Скачать APK", icon=ft.Icons.DOWNLOAD, primary=True,
++                                      url=release.apk_url or release.page_url),
++                    ]
+                 else:
+                     status.value = f"Актуальная версия: {APP_VERSION}"
+             except (UpdateCheckError, Exception):
+@@ -111,17 +253,25 @@ async def main(page: ft.Page):
+             page.update()
+ 
+         button.on_click = check
+-        view("Обновление ЭРА", [ft.Text(f"Установлено: {APP_VERSION}", color=MUTED),
+-                                button, status, options], back=render_home if user else render_login)
++        view(
++            "Обновление ЭРА",
++            [
++                stat_card("Установлено", APP_VERSION, SUCCESS),
++                button,
++                status,
++                options,
++            ],
++            back=render_home if user else render_login,
++            subtitle="Обновление APK через GitHub Releases.",
++        )
+ 
+     def render_login():
+         stop_poll()
+-        username = ft.TextField(label="Логин на сайте ЭРА", value=saved_username,
+-                                autocorrect=False)
++        username = ft.TextField(label="Логин на сайте ЭРА", value=saved_username, autocorrect=False)
+         password = ft.TextField(label="Пароль ЭРА", password=True, can_reveal_password=True)
+         remember = ft.Checkbox(label="Запомнить меня на 90 дней", value=True)
+         err = error_text()
+-        button = ft.Button(content="Войти", bgcolor=ACCENT, color=BG, height=47)
++        button = action_button("Войти", icon=ft.Icons.LOGIN, primary=True)
+ 
+         async def submit(e):
+             nonlocal token, user, saved_username
+@@ -134,14 +284,13 @@ async def main(page: ft.Page):
+             err.visible = False
+             page.update()
+             try:
+-                result = await call(api.login, username.value or "", password.value or "",
+-                                    bool(remember.value))
++                result = await call(api.login, username.value or "", password.value or "", bool(remember.value))
+                 token = result["access_token"]
+                 user = result["user"]
+                 try:
+                     user.update(await call(api.profile, token))
+                 except ERAError:
+-                    pass  # Server may still be on v0.5; do not invalidate login.
++                    pass
+                 saved_username = user["username"]
+                 if remember.value:
+                     try:
+@@ -163,17 +312,37 @@ async def main(page: ft.Page):
+ 
+         button.on_click = submit
+         password.on_submit = submit
+-        controls = [ft.Icon(ft.Icons.ACCOUNT_CIRCLE, size=56, color=ACCENT),
+-                    ft.Text("Один аккаунт для сайта и Android", color=MUTED, size=12),
+-                    username, password, remember, err, button]
++        controls = [
++            ft.Container(
++                padding=16,
++                bgcolor=CARD_ALT,
++                border_radius=18,
++                border=ft.border.all(1, "#243856"),
++                content=ft.Column(
++                    spacing=10,
++                    controls=[
++                        ft.Row(controls=[ft.Icon(ft.Icons.ACCOUNT_CIRCLE, size=48, color=ACCENT),
++                                         ft.Column(controls=[
++                                             ft.Text("Вход в ЭРА", size=18, color=TEXT,
++                                                     weight=ft.FontWeight.BOLD),
++                                             ft.Text("Один аккаунт для сайта и Android", color=MUTED, size=12),
++                                         ])]),
++                        username,
++                        password,
++                        remember,
++                        err,
++                        button,
++                    ],
++                ),
++            )
++        ]
+         if api:
+-            controls.append(ft.Button(content="Зарегистрироваться на сайте ЭРА",
+-                                      action=ft.OpenUrl(api.base_url)))
++            controls.append(action_button("Открыть сайт ЭРА", icon=ft.Icons.OPEN_IN_BROWSER, url=api.base_url))
+         else:
+             controls.append(ft.Text(config_error, color=ERROR, size=12))
+-        controls.append(ft.TextButton(content=f"Проверить обновления · {APP_VERSION}",
+-                                      on_click=lambda e: render_updates()))
+-        view("Вход в ЭРА", controls)
++        controls.append(action_button(f"Проверить обновления · {APP_VERSION}",
++                                      lambda e: render_updates(), icon=ft.Icons.UPDATE))
++        view("Вход в ЭРА", controls, subtitle="Авторизация в существующем аккаунте сайта.")
+ 
+     def render_home():
+         stop_poll()
+@@ -197,38 +366,54 @@ async def main(page: ft.Page):
+             render_login()
+             notify("Вы вышли из аккаунта ЭРА")
+ 
+-        view("ЭРА · Мобильное приложение", [
+-            ft.Container(bgcolor="#223651", padding=13, border_radius=12,
+-                content=ft.Column(controls=[
+-                    ft.Text(f"Привет, {user.get('username', '')}!", size=18, weight=ft.FontWeight.BOLD),
+-                    ft.Text("Все данные синхронизированы с сайтом ЭРА", size=12, color=MUTED)])),
+-            ft.Button(content="Главная · баланс и события", icon=ft.Icons.DASHBOARD,
+-                      on_click=lambda e: asyncio.create_task(screens.dashboard())),
+-            ft.Button(content="Мой профиль и настройки", icon=ft.Icons.PERSON,
+-                      on_click=lambda e: asyncio.create_task(screens.profile())),
+-            ft.Button(content="Чаты", icon=ft.Icons.CHAT_BUBBLE_OUTLINE,
+-                      on_click=lambda e: asyncio.create_task(render_chats())),
+-            ft.Button(content="Пользователи", icon=ft.Icons.PEOPLE,
+-                      on_click=lambda e: asyncio.create_task(render_users())),
+-            ft.Button(content="Новости ЭРА", icon=ft.Icons.ARTICLE,
+-                      on_click=lambda e: asyncio.create_task(screens.news())),
+-            ft.Button(content="Новости из источников", icon=ft.Icons.PUBLIC,
+-                      on_click=lambda e: asyncio.create_task(screens.feed())),
+-            ft.Button(content="Календарь", icon=ft.Icons.CALENDAR_MONTH,
+-                      on_click=lambda e: asyncio.create_task(screens.calendar())),
+-            ft.Button(content="Расходы и аналитика", icon=ft.Icons.RECEIPT_LONG,
+-                      on_click=lambda e: asyncio.create_task(screens.expenses())),
+-            ft.Button(content="Магазин", icon=ft.Icons.SHOPPING_BAG,
+-                      on_click=lambda e: asyncio.create_task(screens.shop())),
+-            ft.Button(content="Мои покупки", icon=ft.Icons.INVENTORY_2,
+-                      on_click=lambda e: asyncio.create_task(screens.inventory())),
+-            ft.Button(content=f"Обновления · {APP_VERSION}", icon=ft.Icons.UPDATE,
+-                      on_click=lambda e: render_updates()),
+-            ft.OutlinedButton(content="Выйти", icon=ft.Icons.LOGOUT, on_click=logout),
+-        ])
+-
+-    def render_profile():
+-        asyncio.create_task(screens.profile())
++        controls = [
++            ft.Container(
++                bgcolor=CARD_ALT,
++                border_radius=18,
++                padding=14,
++                border=ft.border.all(1, "#243856"),
++                content=ft.Column(
++                    spacing=10,
++                    controls=[
++                        ft.Text(f"Привет, {user.get('username', '')}!", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
++                        ft.Text("Все данные синхронизированы с сайтом ЭРА", size=12, color=MUTED),
++                        ft.Row(wrap=True, spacing=8, controls=[
++                            chip("Версия", APP_VERSION),
++                            chip("Уровень", user.get("level", "—"), SUCCESS),
++                            chip("Монеты", user.get("balance_coin", "—"), SUCCESS),
++                        ]),
++                    ],
++                ),
++            ),
++            section_title("Основное"),
++            nav_card("Главная", "Баланс, события и быстрый обзор", ft.Icons.DASHBOARD,
++                     lambda: asyncio.create_task(screens.dashboard())),
++            nav_card("Профиль и настройки", "Личные данные, пароль, аватар и покупки", ft.Icons.PERSON,
++                     lambda: asyncio.create_task(screens.profile())),
++            nav_card("Чаты", "Список диалогов и сообщения", ft.Icons.CHAT_BUBBLE_OUTLINE,
++                     lambda: asyncio.create_task(render_chats())),
++            nav_card("Пользователи", "Начать новый диалог", ft.Icons.PEOPLE,
++                     lambda: asyncio.create_task(render_users())),
++            section_title("Контент"),
++            nav_card("Новости ЭРА", "Лента, комментарии и лайки", ft.Icons.ARTICLE,
++                     lambda: asyncio.create_task(screens.news())),
++            nav_card("Внешние новости", "Публичные источники и поиск", ft.Icons.PUBLIC,
++                     lambda: asyncio.create_task(screens.feed())),
++            section_title("Планирование и финансы"),
++            nav_card("Календарь", "События и напоминания", ft.Icons.CALENDAR_MONTH,
++                     lambda: asyncio.create_task(screens.calendar())),
++            nav_card("Расходы", "Категории, расходы и аналитика", ft.Icons.RECEIPT_LONG,
++                     lambda: asyncio.create_task(screens.expenses())),
++            nav_card("Магазин", "Товары и покупки за монеты", ft.Icons.SHOPPING_BAG,
++                     lambda: asyncio.create_task(screens.shop())),
++            nav_card("Мои покупки", "Инвентарь и приобретённые товары", ft.Icons.INVENTORY_2,
++                     lambda: asyncio.create_task(screens.inventory())),
++            section_title("Система"),
++            nav_card("Обновления", f"Проверка версии {APP_VERSION}", ft.Icons.UPDATE,
++                     render_updates),
++            action_button("Выйти", logout, icon=ft.Icons.LOGOUT),
++        ]
++        view("ЭРА · Мобильное приложение", controls, subtitle="Полноценный мобильный клиент сайта ЭРА.")
+ 
+     async def render_users():
+         stop_poll()
+@@ -236,11 +421,17 @@ async def main(page: ft.Page):
+             return render_login()
+         try:
+             users = await call(api.users, token)
+-            buttons = [ft.OutlinedButton(content=f"{item['username']}",
+-                        icon=ft.Icons.PERSON_OUTLINE,
+-                        on_click=lambda e, p=item: asyncio.create_task(render_chat(p))) for item in users]
+-            view("Пользователи ЭРА", buttons or [ft.Text("Нет пользователей", color=MUTED)],
+-                 back=render_home)
++            cards = []
++            for item in users:
++                cards.append(list_card(
++                    item['username'],
++                    subtitle=f"ID пользователя: {item['id']}",
++                    icon=ft.Icons.PERSON_OUTLINE,
++                    on_click=lambda p=item: asyncio.create_task(render_chat(p)),
++                    trailing=ft.Icon(ft.Icons.CHAT, color=ACCENT),
++                ))
++            view("Пользователи ЭРА", cards or [ft.Text("Нет пользователей", color=MUTED)],
++                 back=render_home, subtitle="Выберите пользователя, чтобы начать чат.")
+         except ERAError as exc:
+             notify(str(exc))
+ 
+@@ -250,16 +441,33 @@ async def main(page: ft.Page):
+             return render_login()
+         try:
+             chats = await call(api.chats, token)
+-            buttons = [ft.OutlinedButton(
+-                content=f"{item['user']['username']}: {(item['last_message']['text'] or '[вложение]')[:38]}",
+-                icon=ft.Icons.CHAT_OUTLINED,
+-                on_click=lambda e, p=item['user']: asyncio.create_task(render_chat(p))) for item in chats]
+-            view("Чаты ЭРА", buttons or [ft.Text("Переписок пока нет", color=MUTED),
+-                 ft.Button(content="Найти пользователя",
+-                           on_click=lambda e: asyncio.create_task(render_users()))], back=render_home)
++            cards = []
++            for item in chats:
++                preview = (item['last_message'].get('text') or '[вложение]')[:55]
++                cards.append(list_card(
++                    item['user']['username'],
++                    subtitle=preview,
++                    icon=ft.Icons.CHAT_OUTLINED,
++                    on_click=lambda p=item['user']: asyncio.create_task(render_chat(p)),
++                    trailing=ft.Icon(ft.Icons.CHEVRON_RIGHT, color=MUTED),
++                ))
++            controls = cards or [
++                ft.Text("Переписок пока нет", color=MUTED),
++                action_button("Найти пользователя", lambda e: asyncio.create_task(render_users()), icon=ft.Icons.PERSON_SEARCH),
++            ]
++            view("Чаты ЭРА", controls, back=render_home,
++                 subtitle="Открывайте отдельные диалоги, а не весь поток сообщений сразу.")
+         except ERAError as exc:
+             notify(str(exc))
+ 
++    def format_dt(value):
++        if not value:
++            return ""
++        try:
++            return datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%d.%m %H:%M")
++        except Exception:
++            return value[:16]
++
+     async def render_chat(peer):
+         nonlocal active_chat_id, polling_task
+         stop_poll()
+@@ -267,44 +475,69 @@ async def main(page: ft.Page):
+             return render_login()
+         peer_id = int(peer["id"])
+         active_chat_id = peer_id
+-        items = ft.Column(spacing=8)
+-        input_box = ft.TextField(label="Сообщение", multiline=True, min_lines=1, max_lines=3)
++        message_list = ft.ListView(expand=True, spacing=8, auto_scroll=True, padding=6)
++        input_box = ft.TextField(label="Сообщение", multiline=True, min_lines=1, max_lines=4, expand=True)
+         status = ft.Text("Загрузка переписки...", color=MUTED, size=11)
++        hint = ft.Text("Показываются последние 40 сообщений. Новые сообщения синхронизируются автоматически.", color=MUTED, size=11)
+         seen = set()
+         last_id = 0
+ 
+-        def show_rows(rows):
+-            nonlocal last_id
++        def message_bubble(msg):
++            mine = int(msg["sender_id"]) == user["id"]
++            text_value = msg.get("text") or ""
++            file_name = msg.get('file_name') or 'Вложение'
++            file_url = msg.get('file_url') or ''
++            meta = ft.Text(format_dt(msg.get("created_at")), size=10, color=MUTED)
++            body_controls = []
++            if text_value:
++                body_controls.append(ft.Text(text_value, color=TEXT, size=13, selectable=True))
++            else:
++                body_controls.append(ft.Text(f"📎 {file_name}", color=TEXT, size=13))
++            if file_url.startswith('/static/chat_uploads/') and api:
++                body_controls.append(action_button('Открыть вложение', icon=ft.Icons.ATTACH_FILE,
++                                                   url=api.base_url + file_url))
++            body_controls.append(meta)
++            return ft.Row(
++                alignment=ft.MainAxisAlignment.END if mine else ft.MainAxisAlignment.START,
++                controls=[
++                    ft.Container(
++                        width=min(max((page.width or 390) - 110, 180), 460),
++                        padding=12,
++                        border_radius=16,
++                        bgcolor="#28466F" if mine else "#29364B",
++                        border=ft.border.all(1, "#36557E" if mine else "#36445C"),
++                        content=ft.Column(spacing=5, controls=body_controls),
++                    )
++                ],
++            )
++
++        def show_rows(rows, replace=False):
++            nonlocal last_id, seen
++            if replace:
++                seen = set()
++                last_id = 0
++                message_list.controls = []
++            added = False
+             for msg in rows:
+                 msg_id = int(msg["id"])
+                 if msg_id in seen:
+                     continue
+                 seen.add(msg_id)
+                 last_id = max(last_id, msg_id)
+-                mine = int(msg["sender_id"]) == user["id"]
+-                value = msg.get("text") or f"📎 {msg.get('file_name') or 'Вложение (откройте в браузере)'}"
+-                bubble = [ft.Text(("Вы: " if mine else peer["username"] + ": ") + value,
+-                                  color=TEXT, size=13)]
+-                file_url = msg.get('file_url') or ''
+-                if file_url.startswith('/static/chat_uploads/') and api:
+-                    bubble.append(ft.Button(content='Открыть вложение', icon=ft.Icons.ATTACH_FILE,
+-                             action=ft.OpenUrl(api.base_url + file_url)))
+-                items.controls.append(ft.Container(
+-                    padding=10, border_radius=10,
+-                    bgcolor="#28466F" if mine else "#29364B",
+-                    content=ft.Column(controls=bubble, spacing=3)))
+-            # Keep a bounded number of controls on screen (new messages remain).
+-            if len(items.controls) > 120:
+-                items.controls = items.controls[-100:]
++                message_list.controls.append(message_bubble(msg))
++                added = True
++            if added:
++                if len(message_list.controls) > 60:
++                    message_list.controls = message_list.controls[-60:]
+             page.update()
+ 
+         async def refresh(incremental=True):
+             if active_chat_id != peer_id:
+                 return
+-            rows = await call(api.messages, token, peer_id, last_id if incremental else 0)
++            rows = await call(api.messages, token, peer_id, last_id if incremental else 0, 40)
+             if active_chat_id != peer_id:
+                 return
+-            show_rows(rows)
++            show_rows(rows, replace=not incremental)
+             if any(m["receiver_id"] == user["id"] and not m["is_read"] for m in rows):
+                 await call(api.read, token, peer_id)
+ 
+@@ -337,27 +570,70 @@ async def main(page: ft.Page):
+                 return
+             picked = files[0]
+             if not picked.bytes or len(picked.bytes) > 15 * 1024 * 1024:
+-                notify('Файл пуст или слишком большой (максимум 15 МБ для аудио)')
++                notify('Файл пуст или слишком большой (максимум 15 МБ)')
+                 return
+             status.value = 'Загрузка вложения...'
+             page.update()
+             try:
+                 await call(api.upload_file, token,
+-                    f'/api/mobile/v1/chats/{peer_id}/attachments', picked.name, picked.bytes)
++                           f'/api/mobile/v1/chats/{peer_id}/attachments', picked.name, picked.bytes)
+                 await refresh(True)
+                 status.value = 'Файл отправлен'
+             except ERAError as exc:
+                 status.value = str(exc)
+             page.update()
+ 
+-        send_button = ft.Button(content="Отправить", icon=ft.Icons.SEND,
+-                                bgcolor=ACCENT, color=BG, on_click=send)
+-        attach_button = ft.Button(content='Прикрепить файл', icon=ft.Icons.ATTACH_FILE,
+-                                  on_click=attach)
+-        view("Чат: " + peer["username"], [
+-            ft.Text("Общий чат сайта и Android · текст, фото, документы, аудио", color=MUTED, size=11),
+-            items, input_box, ft.Row(controls=[send_button, attach_button], wrap=True),
+-            status], back=lambda: asyncio.create_task(render_chats()))
++        send_button = action_button("Отправить", icon=ft.Icons.SEND, primary=True)
++        send_button.on_click = send
++        attach_button = action_button('Файл', icon=ft.Icons.ATTACH_FILE)
++        attach_button.on_click = attach
++        open_browser = action_button('Открыть сайт', icon=ft.Icons.OPEN_IN_BROWSER,
++                                     url=api.base_url if api else None)
++        controls = [
++            ft.Container(
++                bgcolor=CARD_ALT,
++                border_radius=16,
++                border=ft.border.all(1, "#243856"),
++                padding=12,
++                content=ft.Column(
++                    spacing=8,
++                    controls=[
++                        ft.Row(controls=[
++                            ft.Icon(ft.Icons.PERSON, color=ACCENT),
++                            ft.Column(expand=True, spacing=2, controls=[
++                                ft.Text(peer['username'], size=18, color=TEXT, weight=ft.FontWeight.BOLD),
++                                ft.Text('Общий чат сайта и Android', size=11, color=MUTED),
++                            ]),
++                            chip('онлайн-обновление'),
++                        ]),
++                        hint,
++                    ],
++                ),
++            ),
++            ft.Container(
++                height=min(max((page.height or 740) - 310, 320), 520),
++                bgcolor="#101B2D",
++                border_radius=16,
++                border=ft.border.all(1, "#243856"),
++                padding=8,
++                content=message_list,
++            ),
++            ft.Container(
++                bgcolor=CARD_ALT,
++                border_radius=16,
++                border=ft.border.all(1, "#243856"),
++                padding=12,
++                content=ft.Column(
++                    spacing=10,
++                    controls=[
++                        input_box,
++                        ft.Row(wrap=True, spacing=8, controls=[send_button, attach_button, open_browser]),
++                        status,
++                    ],
++                ),
++            ),
++        ]
++        view("Чат", controls, back=lambda: asyncio.create_task(render_chats()), subtitle=f"Диалог с {peer['username']}")
+         try:
+             await refresh(False)
+             status.value = "Синхронизация каждые 3 секунды"
+@@ -397,7 +673,6 @@ async def main(page: ft.Page):
+         lambda: asyncio.create_task(require_login()),
+     )
+ 
+-    # Existing local demo remains on disk, but does not provide ERA credentials.
+     try:
+         saved_username = await storage.get(USERNAME_KEY) or ""
+         saved_token = await storage.get(TOKEN_KEY) or ""
+diff --git a/src/update_config.py b/src/update_config.py
+index 80f03c8..1e36b9b 100644
+--- a/src/update_config.py
++++ b/src/update_config.py
+@@ -4,6 +4,6 @@ The GitHub repository must be public. GitHub source commits alone do not update
+ an Android installation: publish a signed APK as a GitHub Release asset.
+ """
+ 
+-APP_VERSION = "0.6.0"
++APP_VERSION = "0.6.1"
+ GITHUB_OWNER = "hermaer"      # Replace with your GitHub user if different.
+ GITHUB_REPOSITORY = "android-login-demo"  # Create this public repository.

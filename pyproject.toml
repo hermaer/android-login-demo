@@ -1,12 +1,12 @@
 [project]
 name = "simplecabinet"
-version = "0.6.0"
+version = "0.6.1"
 description = "ERA Android mobile: news, calendar, store, expenses, chat, profile"
 requires-python = ">=3.10"
 dependencies = ["flet==1.0.5", "flet-secure-storage==1.0.5"]
 
 [tool.flet]
-build_number = 6  # Increment for each new APK update.
+build_number = 7  # Increment for each new APK update.
 org = "com.example"
 product = "Мой кабинет"
 bundle_id = "com.example.simplecabinet"
