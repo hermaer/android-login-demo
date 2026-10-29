@@ -1,12 +1,12 @@
 [project]
 name = "simplecabinet"
-version = "0.2.0"
+version = "0.3.0"
 description = "Android login, local registration and personal account demo"
 requires-python = ">=3.10"
 dependencies = ["flet==1.0.5"]
 
 [tool.flet]
-build_number = 2  # Increment for each new APK update.
+build_number = 3  # Increment for each new APK update.
 org = "com.example"
 product = "Мой кабинет"
 bundle_id = "com.example.simplecabinet"
