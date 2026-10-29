@@ -10,6 +10,8 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
+import time
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from pathlib import Path
 from typing import Iterator
 
 ITERATIONS = 350_000
+REMEMBER_DAYS = 90
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
@@ -60,6 +63,16 @@ class UserRepository:
                     password_salt BLOB NOT NULL,
                     password_hash BLOB NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            # Safe migration: preserves existing users.sqlite3 on APK upgrades.
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS remembered_sessions (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    token_hash BLOB NOT NULL UNIQUE,
+                    expires_at INTEGER NOT NULL
                 )
                 """
             )
@@ -109,3 +122,53 @@ class UserRepository:
         if not hmac.compare_digest(candidate, saved_hash):
             return None
         return User(id=user_id, name=name, email=saved_email)
+
+    def issue_remembered_token(self, user_id: int) -> str:
+        """Generate 256-bit token; only digest is stored in the SQLite DB."""
+        token = secrets.token_urlsafe(32)
+        digest = hashlib.sha256(token.encode("ascii")).digest()
+        expiry = int(time.time()) + REMEMBER_DAYS * 24 * 3600
+        with self._connect() as db:
+            # An individual user has at most one remembered session on this device.
+            if db.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone() is None:
+                raise ValueError("Пользователь не найден.")
+            db.execute(
+                """INSERT INTO remembered_sessions (user_id, token_hash, expires_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       token_hash=excluded.token_hash,
+                       expires_at=excluded.expires_at""",
+                (user_id, digest, expiry),
+            )
+        return token
+
+    def authenticate_remembered(self, token: str) -> User | None:
+        if not isinstance(token, str) or not 20 <= len(token) <= 256:
+            return None
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT u.id, u.name, u.email, s.expires_at
+                   FROM remembered_sessions AS s
+                   JOIN users AS u ON u.id = s.user_id
+                   WHERE s.token_hash=?""",
+                (digest,),
+            ).fetchone()
+            if row is None:
+                return None
+            user_id, name, email, expiry = row
+            if expiry <= int(time.time()):
+                db.execute("DELETE FROM remembered_sessions WHERE token_hash=?", (digest,))
+                return None
+        return User(id=user_id, name=name, email=email)
+
+    def revoke_remembered_token(self, token: str) -> None:
+        if not isinstance(token, str) or not token:
+            return
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        with self._connect() as db:
+            db.execute("DELETE FROM remembered_sessions WHERE token_hash=?", (digest,))
+
+    def revoke_user_remembered_tokens(self, user_id: int) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM remembered_sessions WHERE user_id=?", (user_id,))

@@ -22,8 +22,8 @@ echo [2/3] Updating pip...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 if errorlevel 1 goto install_error
 
-echo [3/3] Installing Flet 1.0.5 (this may download packages)...
-".venv\Scripts\python.exe" -m pip install "flet[all]==1.0.5"
+echo [3/3] Installing Flet 1.0.5 and secure storage...
+".venv\Scripts\python.exe" -m pip install "flet[all]==1.0.5" "flet-secure-storage==1.0.5"
 if errorlevel 1 goto install_error
 
 echo.

@@ -3,8 +3,10 @@
 import asyncio
 
 import flet as ft
+import flet_secure_storage as fss
 
 from database import User, UserRepository
+from remembered_login import RememberedLogin
 from update_config import APP_VERSION, GITHUB_OWNER, GITHUB_REPOSITORY
 from updater import UpdateCheckError, fetch_latest_release, is_newer
 
@@ -17,14 +19,19 @@ MUTED = "#A4B2C9"
 ERROR = "#FF9D9D"
 
 
-def main(page: ft.Page) -> None:
+async def main(page: ft.Page) -> None:
     page.title = "Мой кабинет"
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = BG
     page.padding = 14
 
     repo = UserRepository()
+    # Android Keystore / Windows Credential Manager. Never save a raw password.
+    # Keep a strong reference to the service for the lifetime of the page.
+    secure_storage = fss.SecureStorage()
+    remembered_login = RememberedLogin(repo, secure_storage)
     signed_in_user: User | None = None
+    remembered_email = ""
 
     def show_message(message: str) -> None:
         page.show_dialog(ft.SnackBar(content=ft.Text(message)))
@@ -183,28 +190,55 @@ def main(page: ft.Page) -> None:
         )
 
     def render_login() -> None:
+        nonlocal remembered_email
         email = ft.TextField(
             label="Электронная почта",
             hint_text="you@example.com",
+            value=remembered_email,
             keyboard_type=ft.KeyboardType.EMAIL,
             autocorrect=False,
         )
         password = ft.TextField(
             label="Пароль", password=True, can_reveal_password=True
         )
+        remember_checkbox = ft.Checkbox(label="Запомнить меня", value=False)
         error = inline_error()
+        login_button = ft.Button(
+            content="Войти",
+            bgcolor=ACCENT,
+            color=BG,
+            height=48,
+        )
 
-        def do_login(_e=None) -> None:
-            nonlocal signed_in_user
-            user = repo.authenticate(email.value or "", password.value or "")
-            if user is None:
-                error.value = "Неверная почта или пароль."
-                error.visible = True
-                page.update()
+        async def do_login(_e=None) -> None:
+            nonlocal signed_in_user, remembered_email
+            if login_button.disabled:
                 return
-            signed_in_user = user
-            render_home()
+            login_button.disabled = True
+            error.visible = False
+            page.update()
+            try:
+                user = await asyncio.to_thread(repo.authenticate, email.value or "", password.value or "")
+                if user is None:
+                    error.value = "Неверная почта или пароль."
+                    error.visible = True
+                    page.update()
+                    return
+                if remember_checkbox.value:
+                    saved = await remembered_login.remember(user)
+                    remembered_email = user.email if saved else ""
+                else:
+                    await remembered_login.clear(user, keep_email=False)
+                    remembered_email = ""
+                    saved = True
+                signed_in_user = user
+                render_home()
+                if not saved:
+                    show_message("Вход выполнен, но запомнить его не удалось. Проверьте настройки устройства.")
+            finally:
+                login_button.disabled = False
 
+        login_button.on_click = do_login
         password.on_submit = do_login
         page_frame(
             ft.Column(
@@ -215,14 +249,15 @@ def main(page: ft.Page) -> None:
                     ft.Container(height=6),
                     email,
                     password,
-                    error,
-                    ft.Button(
-                        content="Войти",
-                        bgcolor=ACCENT,
-                        color=BG,
-                        height=48,
-                        on_click=do_login,
+                    remember_checkbox,
+                    ft.Text(
+                        "Если включить, приложение запомнит вход на этом устройстве на 90 дней. "
+                        "Сам пароль не сохраняется.",
+                        size=11,
+                        color=MUTED,
                     ),
+                    error,
+                    login_button,
                     ft.OutlinedButton(
                         content="Создать аккаунт", height=44, on_click=lambda _e: render_register()
                     ),
@@ -310,11 +345,15 @@ def main(page: ft.Page) -> None:
             render_login()
             return
 
-        def logout(_e=None) -> None:
-            nonlocal signed_in_user
+        async def logout(_e=None) -> None:
+            nonlocal signed_in_user, remembered_email
+            previous_user = signed_in_user
+            # Revoke the remembered session in the DB before showing login.
+            await remembered_login.clear(previous_user, keep_email=True)
             signed_in_user = None
+            _user, remembered_email = await remembered_login.restore()
             render_login()
-            show_message("Вы вышли из аккаунта.")
+            show_message("Вы вышли из аккаунта. Автоматический вход отключён.")
 
         placeholder_buttons = [
             ("Мой профиль", ft.Icons.PERSON_OUTLINE),
@@ -370,7 +409,12 @@ def main(page: ft.Page) -> None:
             )
         )
 
-    render_login()
+    # Restore local remembered session after each cold launch of the app.
+    signed_in_user, remembered_email = await remembered_login.restore()
+    if signed_in_user is not None:
+        render_home()
+    else:
+        render_login()
 
 
 if __name__ == "__main__":
