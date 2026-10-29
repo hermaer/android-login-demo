@@ -9,3 +9,13 @@ signing.local.bat
 *.jks
 *.keystore
 release_keys/
+
+# Local databases and private configuration
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+*.apk
+*.p12
+*.pem

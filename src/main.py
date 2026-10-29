@@ -1,4 +1,4 @@
-"""ERA Android v0.5 — shared ERA account, profile and two-way chat.
+"""ERA Android v0.6 — native ERA dashboard, news, chat, calendar, shop and expenses.
 
 The existing offline SQLite accounts are intentionally NOT migrated or deleted:
 new login uses the existing website's username/password and PostgreSQL DB.
@@ -10,6 +10,7 @@ import flet_secure_storage as fss
 
 from era_client import ERAClient, ERAError
 from era_config import ERA_BASE_URL
+from era_screens import MobileScreens
 from update_config import APP_VERSION, GITHUB_OWNER, GITHUB_REPOSITORY
 from updater import UpdateCheckError, fetch_latest_release, is_newer
 
@@ -28,7 +29,7 @@ async def main(page: ft.Page):
     page.title = "ЭРА"
     page.bgcolor = BG
     page.theme_mode = ft.ThemeMode.DARK
-    page.padding = 12
+    page.padding = 8
     storage = fss.SecureStorage()
     token = ""
     user = None
@@ -53,19 +54,22 @@ async def main(page: ft.Page):
         polling_task = None
 
     def view(title, controls, *, back=None):
-        width = min(480, max(240, (page.width or 390) - 28))
-        content = []
+        width = min(660, max(280, (page.width or 390) - 20))
+        content = [
+            ft.Container(bgcolor="#12233B", padding=12, border_radius=12,
+                         content=ft.Row(controls=[
+                             ft.Icon(ft.Icons.BOLT, color=ACCENT, size=27),
+                             ft.Text("ЭРА", size=23, weight=ft.FontWeight.BOLD, color=TEXT),
+                             ft.Text("· mobile", size=11, color=MUTED)])),
+        ]
         if back:
             content.append(ft.TextButton(content="← Назад", on_click=lambda e: back()))
-        content.extend([
-            ft.Text(title, size=23, weight=ft.FontWeight.BOLD, color=TEXT),
-            *controls,
-        ])
+        content.extend([ft.Text(title, size=22, weight=ft.FontWeight.BOLD, color=TEXT), *controls])
         page.clean()
         page.add(ft.SafeArea(content=ft.Column(
-            controls=[ft.Container(width=width, padding=18, bgcolor=CARD,
+            controls=[ft.Container(width=width, padding=13, bgcolor=CARD,
                                    border_radius=18,
-                                   content=ft.Column(controls=content, spacing=12))],
+                                   content=ft.Column(controls=content, spacing=13))],
             scroll=ft.ScrollMode.AUTO, expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         ), expand=True))
@@ -134,6 +138,10 @@ async def main(page: ft.Page):
                                     bool(remember.value))
                 token = result["access_token"]
                 user = result["user"]
+                try:
+                    user.update(await call(api.profile, token))
+                except ERAError:
+                    pass  # Server may still be on v0.5; do not invalidate login.
                 saved_username = user["username"]
                 if remember.value:
                     try:
@@ -189,33 +197,38 @@ async def main(page: ft.Page):
             render_login()
             notify("Вы вышли из аккаунта ЭРА")
 
-        view("Личный кабинет ЭРА", [
-            ft.Text(f"Привет, {user.get('username', '')}!", color=TEXT, size=17),
-            ft.Text("Профиль, чат и сообщения используют базу сайта ЭРА", color=MUTED, size=12),
-            ft.Button(content="Мой профиль", icon=ft.Icons.PERSON,
-                      on_click=lambda e: render_profile()),
+        view("ЭРА · Мобильное приложение", [
+            ft.Container(bgcolor="#223651", padding=13, border_radius=12,
+                content=ft.Column(controls=[
+                    ft.Text(f"Привет, {user.get('username', '')}!", size=18, weight=ft.FontWeight.BOLD),
+                    ft.Text("Все данные синхронизированы с сайтом ЭРА", size=12, color=MUTED)])),
+            ft.Button(content="Главная · баланс и события", icon=ft.Icons.DASHBOARD,
+                      on_click=lambda e: asyncio.create_task(screens.dashboard())),
+            ft.Button(content="Мой профиль и настройки", icon=ft.Icons.PERSON,
+                      on_click=lambda e: asyncio.create_task(screens.profile())),
             ft.Button(content="Чаты", icon=ft.Icons.CHAT_BUBBLE_OUTLINE,
                       on_click=lambda e: asyncio.create_task(render_chats())),
             ft.Button(content="Пользователи", icon=ft.Icons.PEOPLE,
                       on_click=lambda e: asyncio.create_task(render_users())),
-            ft.OutlinedButton(content="Новости · скоро", disabled=True),
-            ft.OutlinedButton(content="Календарь · скоро", disabled=True),
-            ft.Button(content=f"Проверить обновления · {APP_VERSION}", icon=ft.Icons.UPDATE,
+            ft.Button(content="Новости ЭРА", icon=ft.Icons.ARTICLE,
+                      on_click=lambda e: asyncio.create_task(screens.news())),
+            ft.Button(content="Новости из источников", icon=ft.Icons.PUBLIC,
+                      on_click=lambda e: asyncio.create_task(screens.feed())),
+            ft.Button(content="Календарь", icon=ft.Icons.CALENDAR_MONTH,
+                      on_click=lambda e: asyncio.create_task(screens.calendar())),
+            ft.Button(content="Расходы и аналитика", icon=ft.Icons.RECEIPT_LONG,
+                      on_click=lambda e: asyncio.create_task(screens.expenses())),
+            ft.Button(content="Магазин", icon=ft.Icons.SHOPPING_BAG,
+                      on_click=lambda e: asyncio.create_task(screens.shop())),
+            ft.Button(content="Мои покупки", icon=ft.Icons.INVENTORY_2,
+                      on_click=lambda e: asyncio.create_task(screens.inventory())),
+            ft.Button(content=f"Обновления · {APP_VERSION}", icon=ft.Icons.UPDATE,
                       on_click=lambda e: render_updates()),
             ft.OutlinedButton(content="Выйти", icon=ft.Icons.LOGOUT, on_click=logout),
         ])
 
     def render_profile():
-        stop_poll()
-        if not user:
-            return render_login()
-        view("Мой профиль", [
-            ft.Text(f"Логин: {user.get('username','')}", color=TEXT),
-            ft.Text(f"Email: {user.get('email') or 'не указан'}", color=MUTED),
-            ft.Text(f"Телефон: {user.get('phone') or 'не указан'}", color=MUTED),
-            ft.Text(f"Уровень: {user.get('level','—')}", color=MUTED),
-            ft.Text(user.get("about") or "", color=MUTED),
-        ], back=render_home)
+        asyncio.create_task(screens.profile())
 
     async def render_users():
         stop_poll()
@@ -270,11 +283,16 @@ async def main(page: ft.Page):
                 last_id = max(last_id, msg_id)
                 mine = int(msg["sender_id"]) == user["id"]
                 value = msg.get("text") or f"📎 {msg.get('file_name') or 'Вложение (откройте в браузере)'}"
+                bubble = [ft.Text(("Вы: " if mine else peer["username"] + ": ") + value,
+                                  color=TEXT, size=13)]
+                file_url = msg.get('file_url') or ''
+                if file_url.startswith('/static/chat_uploads/') and api:
+                    bubble.append(ft.Button(content='Открыть вложение', icon=ft.Icons.ATTACH_FILE,
+                             action=ft.OpenUrl(api.base_url + file_url)))
                 items.controls.append(ft.Container(
                     padding=10, border_radius=10,
                     bgcolor="#28466F" if mine else "#29364B",
-                    content=ft.Text(("Вы: " if mine else peer["username"] + ": ") + value,
-                                    color=TEXT, size=13)))
+                    content=ft.Column(controls=bubble, spacing=3)))
             # Keep a bounded number of controls on screen (new messages remain).
             if len(items.controls) > 120:
                 items.controls = items.controls[-100:]
@@ -309,11 +327,37 @@ async def main(page: ft.Page):
                 send_button.disabled = False
                 page.update()
 
+        async def attach(e):
+            try:
+                files = await ft.FilePicker().pick_files(allow_multiple=False, with_data=True)
+            except Exception:
+                notify('Не удалось открыть выбор файла')
+                return
+            if not files:
+                return
+            picked = files[0]
+            if not picked.bytes or len(picked.bytes) > 15 * 1024 * 1024:
+                notify('Файл пуст или слишком большой (максимум 15 МБ для аудио)')
+                return
+            status.value = 'Загрузка вложения...'
+            page.update()
+            try:
+                await call(api.upload_file, token,
+                    f'/api/mobile/v1/chats/{peer_id}/attachments', picked.name, picked.bytes)
+                await refresh(True)
+                status.value = 'Файл отправлен'
+            except ERAError as exc:
+                status.value = str(exc)
+            page.update()
+
         send_button = ft.Button(content="Отправить", icon=ft.Icons.SEND,
                                 bgcolor=ACCENT, color=BG, on_click=send)
+        attach_button = ft.Button(content='Прикрепить файл', icon=ft.Icons.ATTACH_FILE,
+                                  on_click=attach)
         view("Чат: " + peer["username"], [
-            ft.Text("Сообщения общие с браузерной версией ЭРА", color=MUTED, size=11),
-            items, input_box, send_button, status], back=lambda: asyncio.create_task(render_chats()))
+            ft.Text("Общий чат сайта и Android · текст, фото, документы, аудио", color=MUTED, size=11),
+            items, input_box, ft.Row(controls=[send_button, attach_button], wrap=True),
+            status], back=lambda: asyncio.create_task(render_chats()))
         try:
             await refresh(False)
             status.value = "Синхронизация каждые 3 секунды"
@@ -333,6 +377,26 @@ async def main(page: ft.Page):
 
         polling_task = asyncio.create_task(poll())
 
+    def merge_user(updated):
+        nonlocal user
+        user = {**(user or {}), **updated}
+
+    async def require_login():
+        nonlocal token, user
+        token, user = '', None
+        stop_poll()
+        try:
+            await storage.remove(TOKEN_KEY)
+        except Exception:
+            pass
+        render_login()
+
+    screens = MobileScreens(
+        page, api, lambda: token, lambda: user or {}, merge_user,
+        view, render_home, notify, call, stop_poll,
+        lambda: asyncio.create_task(require_login()),
+    )
+
     # Existing local demo remains on disk, but does not provide ERA credentials.
     try:
         saved_username = await storage.get(USERNAME_KEY) or ""
@@ -340,6 +404,10 @@ async def main(page: ft.Page):
         if api and saved_token:
             user = await call(api.me, saved_token)
             token = saved_token
+            try:
+                user.update(await call(api.profile, saved_token))
+            except ERAError:
+                pass
     except Exception:
         try:
             await storage.remove(TOKEN_KEY)
