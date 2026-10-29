@@ -1,417 +1,351 @@
-"""Entry point: run with `flet run` or `python src/main.py`."""
+"""ERA Android v0.5 — shared ERA account, profile and two-way chat.
 
+The existing offline SQLite accounts are intentionally NOT migrated or deleted:
+new login uses the existing website's username/password and PostgreSQL DB.
+"""
 import asyncio
 
 import flet as ft
 import flet_secure_storage as fss
 
-from database import User, UserRepository
-from remembered_login import RememberedLogin
+from era_client import ERAClient, ERAError
+from era_config import ERA_BASE_URL
 from update_config import APP_VERSION, GITHUB_OWNER, GITHUB_REPOSITORY
 from updater import UpdateCheckError, fetch_latest_release, is_newer
 
-# Colors for a simple, phone-friendly dark interface.
 BG = "#0B1220"
 CARD = "#162033"
 ACCENT = "#5793FA"
 TEXT = "#F2F6FF"
 MUTED = "#A4B2C9"
 ERROR = "#FF9D9D"
+SUCCESS = "#85E2B5"
+TOKEN_KEY = "era.mobile.token.v1"  # Keystore; NEVER save the raw password.
+USERNAME_KEY = "era.mobile.username.v1"
 
 
-async def main(page: ft.Page) -> None:
-    page.title = "Мой кабинет"
-    page.theme_mode = ft.ThemeMode.DARK
+async def main(page: ft.Page):
+    page.title = "ЭРА"
     page.bgcolor = BG
-    page.padding = 14
+    page.theme_mode = ft.ThemeMode.DARK
+    page.padding = 12
+    storage = fss.SecureStorage()
+    token = ""
+    user = None
+    saved_username = ""
+    active_chat_id = None
+    polling_task = None
+    try:
+        api = ERAClient(ERA_BASE_URL)
+        config_error = ""
+    except ERAError as exc:
+        api = None
+        config_error = str(exc)
 
-    repo = UserRepository()
-    # Android Keystore / Windows Credential Manager. Never save a raw password.
-    # Keep a strong reference to the service for the lifetime of the page.
-    secure_storage = fss.SecureStorage()
-    remembered_login = RememberedLogin(repo, secure_storage)
-    signed_in_user: User | None = None
-    remembered_email = ""
-
-    def show_message(message: str) -> None:
+    def notify(message):
         page.show_dialog(ft.SnackBar(content=ft.Text(message)))
 
-    def page_frame(content: ft.Control) -> None:
-        # page.width is in logical pixels. Do not use fixed desktop-only widths.
-        width = min(420, max(240, (page.width or 390) - 32))
+    def stop_poll():
+        nonlocal polling_task, active_chat_id
+        active_chat_id = None
+        if polling_task and not polling_task.done():
+            polling_task.cancel()
+        polling_task = None
+
+    def view(title, controls, *, back=None):
+        width = min(480, max(240, (page.width or 390) - 28))
+        content = []
+        if back:
+            content.append(ft.TextButton(content="← Назад", on_click=lambda e: back()))
+        content.extend([
+            ft.Text(title, size=23, weight=ft.FontWeight.BOLD, color=TEXT),
+            *controls,
+        ])
         page.clean()
-        page.add(
-            ft.SafeArea(
-                expand=True,
-                content=ft.Column(
-                    controls=[
-                        ft.Container(
-                            width=width,
-                            padding=22,
-                            bgcolor=CARD,
-                            border_radius=20,
-                            content=content,
-                        )
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    scroll=ft.ScrollMode.AUTO,
-                    expand=True,
-                ),
-            )
-        )
+        page.add(ft.SafeArea(content=ft.Column(
+            controls=[ft.Container(width=width, padding=18, bgcolor=CARD,
+                                   border_radius=18,
+                                   content=ft.Column(controls=content, spacing=12))],
+            scroll=ft.ScrollMode.AUTO, expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        ), expand=True))
         page.update()
 
-    def brand_header(title: str, subtitle: str) -> list[ft.Control]:
-        return [
-            ft.Icon(ft.Icons.ACCOUNT_CIRCLE_OUTLINED, size=54, color=ACCENT),
-            ft.Text(title, size=26, weight=ft.FontWeight.BOLD, color=TEXT),
-            ft.Text(subtitle, size=13, color=MUTED, text_align=ft.TextAlign.CENTER),
-        ]
+    async def call(func, *args):
+        return await asyncio.to_thread(func, *args)
 
-    def inline_error() -> ft.Text:
-        return ft.Text("", size=12, color=ERROR, visible=False)
+    def error_text():
+        return ft.Text("", color=ERROR, size=12, visible=False)
 
-    def render_updates() -> None:
-        """Check public GitHub Releases and offer an APK download in the browser."""
-        checking = False
-        status = ft.Text(
-            "Нажмите кнопку для проверки новой версии на GitHub.",
-            color=MUTED,
-            size=13,
-        )
-        details = ft.Column(spacing=9, controls=[])
-        check_button = ft.Button(
-            content="Проверить обновления",
-            icon=ft.Icons.REFRESH,
-            bgcolor=ACCENT,
-            color=BG,
-            height=46,
-        )
+    def render_updates():
+        stop_poll()
+        status = ft.Text("Нажмите для проверки GitHub Releases", color=MUTED)
+        options = ft.Column(spacing=8)
+        button = ft.Button(content="Проверить обновления", icon=ft.Icons.REFRESH)
 
-        async def check_updates(_e=None) -> None:
-            nonlocal checking
-            if checking:
-                return
-            checking = True
-            check_button.disabled = True
-            details.controls = []
-            status.color = MUTED
-            status.value = "Проверяем GitHub…"
+        async def check(e):
+            button.disabled = True
+            status.value = "Проверка..."
+            options.controls = []
             page.update()
             try:
-                latest = await asyncio.to_thread(
-                    fetch_latest_release, GITHUB_OWNER, GITHUB_REPOSITORY
-                )
-                if is_newer(latest.version, APP_VERSION):
-                    status.value = f"Доступно обновление: {latest.version}"
-                    status.color = "#85E2B5"
-                    details.controls = [
-                        ft.Text(latest.title, weight=ft.FontWeight.BOLD, color=TEXT),
-                        ft.Text(
-                            latest.description or "Описание изменений не указано.",
-                            color=MUTED,
-                            size=12,
-                        ),
-                    ]
-                    if latest.apk_url:
-                        details.controls.append(
-                            ft.Button(
-                                content="Скачать APK обновления",
-                                icon=ft.Icons.DOWNLOAD,
-                                action=ft.OpenUrl(latest.apk_url),
-                                height=46,
-                                bgcolor="#2D735C",
-                                color=TEXT,
-                            )
-                        )
+                release = await call(fetch_latest_release, GITHUB_OWNER, GITHUB_REPOSITORY)
+                if is_newer(release.version, APP_VERSION):
+                    status.value = f"Доступно обновление {release.version}"
+                    options.controls.append(ft.Text(release.title, color=TEXT))
+                    if release.apk_url:
+                        options.controls.append(ft.Button(content="Скачать APK",
+                            icon=ft.Icons.DOWNLOAD, action=ft.OpenUrl(release.apk_url)))
                     else:
-                        details.controls.append(
-                            ft.Text(
-                                "В выпуске нет единственного APK для установки. "
-                                "Откройте страницу выпуска и выберите подходящий файл.",
-                                size=12,
-                                color=MUTED,
-                            )
-                        )
-                        details.controls.append(
-                            ft.OutlinedButton(
-                                content="Открыть GitHub Release",
-                                action=ft.OpenUrl(latest.page_url),
-                            )
-                        )
-                    details.controls.append(
-                        ft.Text(
-                            "После загрузки откройте APK в телефоне и подтвердите "
-                            "установку Android. Это не выполняется автоматически.",
-                            size=11,
-                            color=MUTED,
-                        )
-                    )
+                        options.controls.append(ft.Button(content="Открыть выпуск GitHub",
+                            action=ft.OpenUrl(release.page_url)))
                 else:
-                    status.value = f"Установлена актуальная версия {APP_VERSION}."
-                    status.color = "#85E2B5"
-            except UpdateCheckError as exc:
-                status.value = str(exc)
-                status.color = ERROR
-            except Exception:
-                status.value = "Не удалось проверить обновления. Попробуйте ещё раз."
-                status.color = ERROR
-            finally:
-                checking = False
-                check_button.disabled = False
+                    status.value = f"Актуальная версия: {APP_VERSION}"
+            except (UpdateCheckError, Exception):
+                status.value = "Не удалось проверить GitHub Releases"
+            button.disabled = False
+            page.update()
+
+        button.on_click = check
+        view("Обновление ЭРА", [ft.Text(f"Установлено: {APP_VERSION}", color=MUTED),
+                                button, status, options], back=render_home if user else render_login)
+
+    def render_login():
+        stop_poll()
+        username = ft.TextField(label="Логин на сайте ЭРА", value=saved_username,
+                                autocorrect=False)
+        password = ft.TextField(label="Пароль ЭРА", password=True, can_reveal_password=True)
+        remember = ft.Checkbox(label="Запомнить меня на 90 дней", value=True)
+        err = error_text()
+        button = ft.Button(content="Войти", bgcolor=ACCENT, color=BG, height=47)
+
+        async def submit(e):
+            nonlocal token, user, saved_username
+            if not api:
+                err.value = config_error
+                err.visible = True
                 page.update()
-
-        check_button.on_click = check_updates
-        page_frame(
-            ft.Column(
-                spacing=16,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                controls=[
-                    ft.Icon(ft.Icons.UPDATE, size=44, color=ACCENT),
-                    ft.Text("Обновление приложения", size=23, weight=ft.FontWeight.BOLD, color=TEXT),
-                    ft.Text(f"Установленная версия: {APP_VERSION}", size=14, color=TEXT),
-                    ft.Text(
-                        "Проверяем опубликованные APK в GitHub Releases. "
-                        "Изменения исходного кода без сборки APK на телефон не попадут.",
-                        color=MUTED,
-                        size=12,
-                    ),
-                    check_button,
-                    status,
-                    details,
-                    ft.OutlinedButton(
-                        content="Назад в личный кабинет" if signed_in_user else "Назад ко входу",
-                        height=42,
-                        on_click=lambda _e: render_home() if signed_in_user else render_login(),
-                    ),
-                ],
-            )
-        )
-
-    def render_login() -> None:
-        nonlocal remembered_email
-        email = ft.TextField(
-            label="Электронная почта",
-            hint_text="you@example.com",
-            value=remembered_email,
-            keyboard_type=ft.KeyboardType.EMAIL,
-            autocorrect=False,
-        )
-        password = ft.TextField(
-            label="Пароль", password=True, can_reveal_password=True
-        )
-        remember_checkbox = ft.Checkbox(label="Запомнить меня", value=False)
-        error = inline_error()
-        login_button = ft.Button(
-            content="Войти",
-            bgcolor=ACCENT,
-            color=BG,
-            height=48,
-        )
-
-        async def do_login(_e=None) -> None:
-            nonlocal signed_in_user, remembered_email
-            if login_button.disabled:
                 return
-            login_button.disabled = True
-            error.visible = False
+            button.disabled = True
+            err.visible = False
             page.update()
             try:
-                user = await asyncio.to_thread(repo.authenticate, email.value or "", password.value or "")
-                if user is None:
-                    error.value = "Неверная почта или пароль."
-                    error.visible = True
-                    page.update()
-                    return
-                if remember_checkbox.value:
-                    saved = await remembered_login.remember(user)
-                    remembered_email = user.email if saved else ""
+                result = await call(api.login, username.value or "", password.value or "",
+                                    bool(remember.value))
+                token = result["access_token"]
+                user = result["user"]
+                saved_username = user["username"]
+                if remember.value:
+                    try:
+                        await storage.set(TOKEN_KEY, token)
+                        await storage.set(USERNAME_KEY, saved_username)
+                    except Exception:
+                        notify("Вход выполнен, но сохранить сеанс не удалось")
                 else:
-                    await remembered_login.clear(user, keep_email=False)
-                    remembered_email = ""
-                    saved = True
-                signed_in_user = user
+                    try:
+                        await storage.remove(TOKEN_KEY)
+                    except Exception:
+                        pass
                 render_home()
-                if not saved:
-                    show_message("Вход выполнен, но запомнить его не удалось. Проверьте настройки устройства.")
+            except ERAError as exc:
+                err.value, err.visible = str(exc), True
+                page.update()
             finally:
-                login_button.disabled = False
+                button.disabled = False
 
-        login_button.on_click = do_login
-        password.on_submit = do_login
-        page_frame(
-            ft.Column(
-                spacing=17,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                controls=[
-                    *brand_header("С возвращением!", "Войдите в свой аккаунт"),
-                    ft.Container(height=6),
-                    email,
-                    password,
-                    remember_checkbox,
-                    ft.Text(
-                        "Если включить, приложение запомнит вход на этом устройстве на 90 дней. "
-                        "Сам пароль не сохраняется.",
-                        size=11,
-                        color=MUTED,
-                    ),
-                    error,
-                    login_button,
-                    ft.OutlinedButton(
-                        content="Создать аккаунт", height=44, on_click=lambda _e: render_register()
-                    ),
-                    ft.TextButton(
-                        content=f"Обновления · v{APP_VERSION}",
-                        on_click=lambda _e: render_updates(),
-                    ),
-                    ft.Text(
-                        "Тестовая версия: данные хранятся на этом устройстве.",
-                        size=11,
-                        color=MUTED,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                ],
-            )
-        )
+        button.on_click = submit
+        password.on_submit = submit
+        controls = [ft.Icon(ft.Icons.ACCOUNT_CIRCLE, size=56, color=ACCENT),
+                    ft.Text("Один аккаунт для сайта и Android", color=MUTED, size=12),
+                    username, password, remember, err, button]
+        if api:
+            controls.append(ft.Button(content="Зарегистрироваться на сайте ЭРА",
+                                      action=ft.OpenUrl(api.base_url)))
+        else:
+            controls.append(ft.Text(config_error, color=ERROR, size=12))
+        controls.append(ft.TextButton(content=f"Проверить обновления · {APP_VERSION}",
+                                      on_click=lambda e: render_updates()))
+        view("Вход в ЭРА", controls)
 
-    def render_register() -> None:
-        name = ft.TextField(label="Ваше имя", hint_text="Например, Алексей")
-        email = ft.TextField(
-            label="Электронная почта",
-            hint_text="you@example.com",
-            keyboard_type=ft.KeyboardType.EMAIL,
-            autocorrect=False,
-        )
-        password = ft.TextField(
-            label="Пароль (не менее 8 символов)", password=True, can_reveal_password=True
-        )
-        confirm = ft.TextField(
-            label="Повторите пароль", password=True, can_reveal_password=True
-        )
-        error = inline_error()
-
-        def do_register(_e=None) -> None:
-            nonlocal signed_in_user
-            if (password.value or "") != (confirm.value or ""):
-                error.value = "Пароли не совпадают."
-                error.visible = True
-                page.update()
-                return
-            try:
-                user = repo.register(
-                    name.value or "", email.value or "", password.value or ""
-                )
-            except ValueError as exc:
-                error.value = str(exc)
-                error.visible = True
-                page.update()
-                return
-            signed_in_user = user
-            render_home()
-            show_message("Аккаунт успешно создан!")
-
-        confirm.on_submit = do_register
-        page_frame(
-            ft.Column(
-                spacing=14,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                controls=[
-                    *brand_header("Регистрация", "Создайте свой локальный аккаунт"),
-                    name,
-                    email,
-                    password,
-                    confirm,
-                    error,
-                    ft.Button(
-                        content="Зарегистрироваться",
-                        bgcolor=ACCENT,
-                        color=BG,
-                        height=48,
-                        on_click=do_register,
-                    ),
-                    ft.OutlinedButton(
-                        content="У меня уже есть аккаунт",
-                        height=44,
-                        on_click=lambda _e: render_login(),
-                    ),
-                ],
-            )
-        )
-
-    def render_home() -> None:
-        nonlocal signed_in_user
-        if signed_in_user is None:
+    def render_home():
+        stop_poll()
+        if not user:
             render_login()
             return
 
-        async def logout(_e=None) -> None:
-            nonlocal signed_in_user, remembered_email
-            previous_user = signed_in_user
-            # Revoke the remembered session in the DB before showing login.
-            await remembered_login.clear(previous_user, keep_email=True)
-            signed_in_user = None
-            _user, remembered_email = await remembered_login.restore()
+        async def logout(e):
+            nonlocal token, user
+            old = token
+            token, user = "", None
+            try:
+                await storage.remove(TOKEN_KEY)
+            except Exception:
+                pass
+            if api and old:
+                try:
+                    await call(api.logout, old)
+                except ERAError:
+                    pass
             render_login()
-            show_message("Вы вышли из аккаунта. Автоматический вход отключён.")
+            notify("Вы вышли из аккаунта ЭРА")
 
-        placeholder_buttons = [
-            ("Мой профиль", ft.Icons.PERSON_OUTLINE),
-            ("Мои заявки", ft.Icons.DESCRIPTION_OUTLINED),
-            ("Уведомления", ft.Icons.NOTIFICATIONS_OUTLINED),
-            ("Настройки", ft.Icons.SETTINGS_OUTLINED),
-        ]
-        page_frame(
-            ft.Column(
-                spacing=14,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                controls=[
-                    ft.Icon(ft.Icons.HOME_OUTLINED, size=46, color=ACCENT),
-                    ft.Text("Личный кабинет", size=25, weight=ft.FontWeight.BOLD, color=TEXT),
-                    ft.Text(f"Здравствуйте, {signed_in_user.name}!", size=17, color=TEXT),
-                    ft.Text(signed_in_user.email, color=MUTED, size=13),
-                    ft.Container(height=5),
-                    ft.Text("Разделы приложения", size=13, color=MUTED),
-                    *[
-                        ft.OutlinedButton(
-                            content=label,
-                            icon=icon,
-                            height=47,
-                            on_click=lambda _e, button_name=label: show_message(
-                                f"«{button_name}» — раздел в разработке"
-                            ),
-                        )
-                        for label, icon in placeholder_buttons
-                    ],
-                    ft.Container(height=5),
-                    ft.Button(
-                        content=f"Проверить обновления · v{APP_VERSION}",
-                        icon=ft.Icons.UPDATE,
-                        height=47,
-                        on_click=lambda _e: render_updates(),
-                    ),
-                    ft.Container(height=7),
-                    ft.Button(
-                        content="Выйти из аккаунта",
-                        icon=ft.Icons.LOGOUT,
-                        height=47,
-                        bgcolor="#29374F",
-                        color=TEXT,
-                        on_click=logout,
-                    ),
-                    ft.Text(
-                        "Прототип работает без интернета и сервера.",
-                        size=11,
-                        color=MUTED,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                ],
-            )
-        )
+        view("Личный кабинет ЭРА", [
+            ft.Text(f"Привет, {user.get('username', '')}!", color=TEXT, size=17),
+            ft.Text("Профиль, чат и сообщения используют базу сайта ЭРА", color=MUTED, size=12),
+            ft.Button(content="Мой профиль", icon=ft.Icons.PERSON,
+                      on_click=lambda e: render_profile()),
+            ft.Button(content="Чаты", icon=ft.Icons.CHAT_BUBBLE_OUTLINE,
+                      on_click=lambda e: asyncio.create_task(render_chats())),
+            ft.Button(content="Пользователи", icon=ft.Icons.PEOPLE,
+                      on_click=lambda e: asyncio.create_task(render_users())),
+            ft.OutlinedButton(content="Новости · скоро", disabled=True),
+            ft.OutlinedButton(content="Календарь · скоро", disabled=True),
+            ft.Button(content=f"Проверить обновления · {APP_VERSION}", icon=ft.Icons.UPDATE,
+                      on_click=lambda e: render_updates()),
+            ft.OutlinedButton(content="Выйти", icon=ft.Icons.LOGOUT, on_click=logout),
+        ])
 
-    # Restore local remembered session after each cold launch of the app.
-    signed_in_user, remembered_email = await remembered_login.restore()
-    if signed_in_user is not None:
+    def render_profile():
+        stop_poll()
+        if not user:
+            return render_login()
+        view("Мой профиль", [
+            ft.Text(f"Логин: {user.get('username','')}", color=TEXT),
+            ft.Text(f"Email: {user.get('email') or 'не указан'}", color=MUTED),
+            ft.Text(f"Телефон: {user.get('phone') or 'не указан'}", color=MUTED),
+            ft.Text(f"Уровень: {user.get('level','—')}", color=MUTED),
+            ft.Text(user.get("about") or "", color=MUTED),
+        ], back=render_home)
+
+    async def render_users():
+        stop_poll()
+        if not api or not token:
+            return render_login()
+        try:
+            users = await call(api.users, token)
+            buttons = [ft.OutlinedButton(content=f"{item['username']}",
+                        icon=ft.Icons.PERSON_OUTLINE,
+                        on_click=lambda e, p=item: asyncio.create_task(render_chat(p))) for item in users]
+            view("Пользователи ЭРА", buttons or [ft.Text("Нет пользователей", color=MUTED)],
+                 back=render_home)
+        except ERAError as exc:
+            notify(str(exc))
+
+    async def render_chats():
+        stop_poll()
+        if not api or not token:
+            return render_login()
+        try:
+            chats = await call(api.chats, token)
+            buttons = [ft.OutlinedButton(
+                content=f"{item['user']['username']}: {(item['last_message']['text'] or '[вложение]')[:38]}",
+                icon=ft.Icons.CHAT_OUTLINED,
+                on_click=lambda e, p=item['user']: asyncio.create_task(render_chat(p))) for item in chats]
+            view("Чаты ЭРА", buttons or [ft.Text("Переписок пока нет", color=MUTED),
+                 ft.Button(content="Найти пользователя",
+                           on_click=lambda e: asyncio.create_task(render_users()))], back=render_home)
+        except ERAError as exc:
+            notify(str(exc))
+
+    async def render_chat(peer):
+        nonlocal active_chat_id, polling_task
+        stop_poll()
+        if not api or not token:
+            return render_login()
+        peer_id = int(peer["id"])
+        active_chat_id = peer_id
+        items = ft.Column(spacing=8)
+        input_box = ft.TextField(label="Сообщение", multiline=True, min_lines=1, max_lines=3)
+        status = ft.Text("Загрузка переписки...", color=MUTED, size=11)
+        seen = set()
+        last_id = 0
+
+        def show_rows(rows):
+            nonlocal last_id
+            for msg in rows:
+                msg_id = int(msg["id"])
+                if msg_id in seen:
+                    continue
+                seen.add(msg_id)
+                last_id = max(last_id, msg_id)
+                mine = int(msg["sender_id"]) == user["id"]
+                value = msg.get("text") or f"📎 {msg.get('file_name') or 'Вложение (откройте в браузере)'}"
+                items.controls.append(ft.Container(
+                    padding=10, border_radius=10,
+                    bgcolor="#28466F" if mine else "#29364B",
+                    content=ft.Text(("Вы: " if mine else peer["username"] + ": ") + value,
+                                    color=TEXT, size=13)))
+            # Keep a bounded number of controls on screen (new messages remain).
+            if len(items.controls) > 120:
+                items.controls = items.controls[-100:]
+            page.update()
+
+        async def refresh(incremental=True):
+            if active_chat_id != peer_id:
+                return
+            rows = await call(api.messages, token, peer_id, last_id if incremental else 0)
+            if active_chat_id != peer_id:
+                return
+            show_rows(rows)
+            if any(m["receiver_id"] == user["id"] and not m["is_read"] for m in rows):
+                await call(api.read, token, peer_id)
+
+        async def send(e):
+            content = (input_box.value or "").strip()
+            if not content:
+                return
+            if len(content) > 4000:
+                notify("Сообщение слишком длинное (максимум 4000 символов)")
+                return
+            send_button.disabled = True
+            page.update()
+            try:
+                await call(api.send, token, peer_id, content)
+                input_box.value = ""
+                await refresh(True)
+            except ERAError as exc:
+                notify(str(exc))
+            finally:
+                send_button.disabled = False
+                page.update()
+
+        send_button = ft.Button(content="Отправить", icon=ft.Icons.SEND,
+                                bgcolor=ACCENT, color=BG, on_click=send)
+        view("Чат: " + peer["username"], [
+            ft.Text("Сообщения общие с браузерной версией ЭРА", color=MUTED, size=11),
+            items, input_box, send_button, status], back=lambda: asyncio.create_task(render_chats()))
+        try:
+            await refresh(False)
+            status.value = "Синхронизация каждые 3 секунды"
+            page.update()
+        except ERAError as exc:
+            status.value = str(exc)
+            page.update()
+
+        async def poll():
+            while active_chat_id == peer_id:
+                await asyncio.sleep(3)
+                try:
+                    await refresh()
+                except ERAError:
+                    status.value = "Нет соединения. Повторная попытка..."
+                    page.update()
+
+        polling_task = asyncio.create_task(poll())
+
+    # Existing local demo remains on disk, but does not provide ERA credentials.
+    try:
+        saved_username = await storage.get(USERNAME_KEY) or ""
+        saved_token = await storage.get(TOKEN_KEY) or ""
+        if api and saved_token:
+            user = await call(api.me, saved_token)
+            token = saved_token
+    except Exception:
+        try:
+            await storage.remove(TOKEN_KEY)
+        except Exception:
+            pass
+    if user:
         render_home()
     else:
         render_login()
